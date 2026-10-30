@@ -42,24 +42,24 @@ template <typename T>
 class AtomicRcuStore {
 public:
     explicit AtomicRcuStore(std::shared_ptr<const T> initial_state)
-        : state_( validate_non_null(std::move(initial_state)) ) {}
+        : m_state( validate_non_null(std::move(initial_state)) ) {}
 
     template <typename... Args>
         requires std::constructible_from<T, Args...>
     explicit AtomicRcuStore(std::in_place_t, Args&&... args)
-        : state_(std::make_shared<const T>(std::forward<Args>(args)...)) {}
+        : m_state(std::make_shared<const T>(std::forward<Args>(args)...)) {}
 
     AtomicRcuStore(const AtomicRcuStore&) = delete;
     AtomicRcuStore& operator=(const AtomicRcuStore&) = delete;
 
     // Reader path: returns an immutable shared_ptr<const T> snapshot
     [[nodiscard]] std::shared_ptr<const T> read() const noexcept {
-        return state_.load(std::memory_order_acquire);
+        return m_state.load(std::memory_order_acquire);
     }
 
     // Writer path: atomically publishes a pre-built immutable snapshot
     void publish(std::shared_ptr<const T> next_state) {
-        state_.store(validate_non_null(std::move(next_state)), std::memory_order_release);
+        m_state.store(validate_non_null(std::move(next_state)), std::memory_order_release);
     }
 
     // CAS Read-Copy-Update loop: clones current state, applies `mutator(T&)`,
@@ -67,12 +67,12 @@ public:
     template <typename Mutator>
         requires std::invocable<Mutator&, T&> && std::copy_constructible<T>
     std::shared_ptr<const T> update_cas(Mutator&& mutator) {
-        std::shared_ptr<const T> expected = state_.load(std::memory_order_acquire);
+        std::shared_ptr<const T> expected = m_state.load(std::memory_order_acquire);
         for (;;) {
             auto next = std::make_shared<T>(*expected);
             mutator(*next);
             std::shared_ptr<const T> next_const = std::move(next);
-            if (state_.compare_exchange_weak(
+            if (m_state.compare_exchange_weak(
                     expected,
                     next_const,
                     std::memory_order_acq_rel,
@@ -83,7 +83,7 @@ public:
     }
 
     [[nodiscard]] bool is_lock_free() const noexcept {
-        return state_.is_lock_free();
+        return m_state.is_lock_free();
     }
 
 private:
@@ -94,7 +94,7 @@ private:
         return ptr;
     }
 
-    std::atomic<std::shared_ptr<const T>> state_;
+    std::atomic<std::shared_ptr<const T>> m_state;
 };
 
 } // namespace hft

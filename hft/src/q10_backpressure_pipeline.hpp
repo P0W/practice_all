@@ -13,9 +13,9 @@
 //
 // KEY EXCEPTION & CONCURRENCY INVARIANTS:
 //   1. Lost-Wakeup Prevention on Throwing `T` Construction:
-//      In `push()` and `push_for()`, `not_full_.wait()` consumes a notification
-//      from a consumer. If `q_.emplace(...)` subsequently throws an exception
-//      during `T`'s copy/move construction, we MUST call `not_full_.notify_one()`
+//      In `push()` and `push_for()`, `m_not_full.wait()` consumes a notification
+//      from a consumer. If `m_q.emplace(...)` subsequently throws an exception
+//      during `T`'s copy/move construction, we MUST call `m_not_full.notify_one()`
 //      inside `catch (...)` before rethrowing so another waiting producer is
 //      not permanently stranded!
 //   2. Accurate Exception Specifications:
@@ -51,9 +51,9 @@ template <typename T>
 class BoundedChannel {
 public:
     explicit BoundedChannel(std::size_t capacity, OverflowPolicy policy = OverflowPolicy::Block)
-        : cap_(capacity), policy_(policy)
+        : m_cap(capacity), m_policy(policy)
     {
-        if (cap_ == 0) {
+        if (m_cap == 0) {
             throw std::invalid_argument("BoundedChannel: capacity must be > 0");
         }
     }
@@ -63,19 +63,19 @@ public:
 
     template <typename U>
     bool push(U&& item) {
-        std::unique_lock lk(mu_);
-        if (policy_ == OverflowPolicy::Block) {
-            not_full_.wait(lk, [this] { return closed_ || q_.size() < cap_; });
-            if (closed_) return false;
+        std::unique_lock lk(m_mu);
+        if (m_policy == OverflowPolicy::Block) {
+            m_not_full.wait(lk, [this] { return m_closed || m_q.size() < m_cap; });
+            if (m_closed) return false;
             try {
-                q_.emplace_back(std::forward<U>(item));
+                m_q.emplace_back(std::forward<U>(item));
             } catch (...) {
-                // Relay the consumed not_full_ notification to another waiting producer!
-                not_full_.notify_one();
+                // Relay the consumed m_not_full notification to another waiting producer!
+                m_not_full.notify_one();
                 throw;
             }
             lk.unlock();
-            not_empty_.notify_one();
+            m_not_empty.notify_one();
             return true;
         }
         return push_nonblocking_locked(lk, std::forward<U>(item));
@@ -83,109 +83,109 @@ public:
 
     template <typename U>
     [[nodiscard]] bool try_push(U&& item) {
-        std::unique_lock lk(mu_);
-        if (closed_) return false;
-        if (q_.size() >= cap_) {
-            if (policy_ == OverflowPolicy::DropOldest) {
+        std::unique_lock lk(m_mu);
+        if (m_closed) return false;
+        if (m_q.size() >= m_cap) {
+            if (m_policy == OverflowPolicy::DropOldest) {
                 // Construct replacement first before popping oldest for strong exception safety
                 T replacement(std::forward<U>(item));
-                q_.pop_front();
-                q_.push_back(std::move(replacement));
+                m_q.pop_front();
+                m_q.push_back(std::move(replacement));
                 lk.unlock();
-                not_empty_.notify_one();
+                m_not_empty.notify_one();
                 return true;
             }
             return false;
         }
-        q_.emplace_back(std::forward<U>(item));
+        m_q.emplace_back(std::forward<U>(item));
         lk.unlock();
-        not_empty_.notify_one();
+        m_not_empty.notify_one();
         return true;
     }
 
     template <typename U, typename Rep, typename Period>
     [[nodiscard]] bool push_for(U&& item, const std::chrono::duration<Rep, Period>& timeout) {
-        std::unique_lock lk(mu_);
-        if (policy_ == OverflowPolicy::Block) {
-            if (!not_full_.wait_for(lk, timeout, [this] { return closed_ || q_.size() < cap_; })) {
+        std::unique_lock lk(m_mu);
+        if (m_policy == OverflowPolicy::Block) {
+            if (!m_not_full.wait_for(lk, timeout, [this] { return m_closed || m_q.size() < m_cap; })) {
                 return false;
             }
-            if (closed_) return false;
+            if (m_closed) return false;
             try {
-                q_.emplace_back(std::forward<U>(item));
+                m_q.emplace_back(std::forward<U>(item));
             } catch (...) {
-                not_full_.notify_one();
+                m_not_full.notify_one();
                 throw;
             }
             lk.unlock();
-            not_empty_.notify_one();
+            m_not_empty.notify_one();
             return true;
         }
         return push_nonblocking_locked(lk, std::forward<U>(item));
     }
 
     [[nodiscard]] std::optional<T> pop() {
-        std::unique_lock lk(mu_);
-        not_empty_.wait(lk, [this] { return closed_ || !q_.empty(); });
-        if (q_.empty()) {
+        std::unique_lock lk(m_mu);
+        m_not_empty.wait(lk, [this] { return m_closed || !m_q.empty(); });
+        if (m_q.empty()) {
             return std::nullopt;
         }
-        T val = std::move(q_.front());
-        q_.pop_front();
+        T val = std::move(m_q.front());
+        m_q.pop_front();
         lk.unlock();
-        not_full_.notify_one();
+        m_not_full.notify_one();
         return val;
     }
 
     void close() {
         {
-            std::unique_lock lk(mu_);
-            closed_ = true;
+            std::unique_lock lk(m_mu);
+            m_closed = true;
         }
-        not_empty_.notify_all();
-        not_full_.notify_all();
+        m_not_empty.notify_all();
+        m_not_full.notify_all();
     }
 
     [[nodiscard]] bool closed() const {
-        std::unique_lock lk(mu_);
-        return closed_;
+        std::unique_lock lk(m_mu);
+        return m_closed;
     }
 
     [[nodiscard]] std::size_t size() const {
-        std::unique_lock lk(mu_);
-        return q_.size();
+        std::unique_lock lk(m_mu);
+        return m_q.size();
     }
 
 private:
     template <typename U>
     bool push_nonblocking_locked(std::unique_lock<std::mutex>& lk, U&& item) {
-        if (closed_) return false;
-        if (q_.size() >= cap_) {
-            if (policy_ == OverflowPolicy::DropNewest) {
+        if (m_closed) return false;
+        if (m_q.size() >= m_cap) {
+            if (m_policy == OverflowPolicy::DropNewest) {
                 return false;
             }
-            if (policy_ == OverflowPolicy::DropOldest) {
+            if (m_policy == OverflowPolicy::DropOldest) {
                 T replacement(std::forward<U>(item));
-                q_.pop_front();
-                q_.push_back(std::move(replacement));
+                m_q.pop_front();
+                m_q.push_back(std::move(replacement));
                 lk.unlock();
-                not_empty_.notify_one();
+                m_not_empty.notify_one();
                 return true;
             }
         }
-        q_.emplace_back(std::forward<U>(item));
+        m_q.emplace_back(std::forward<U>(item));
         lk.unlock();
-        not_empty_.notify_one();
+        m_not_empty.notify_one();
         return true;
     }
 
-    const std::size_t       cap_;
-    const OverflowPolicy    policy_;
-    mutable std::mutex      mu_;
-    std::condition_variable not_empty_;
-    std::condition_variable not_full_;
-    std::deque<T>           q_;
-    bool                    closed_{false};
+    const std::size_t       m_cap;
+    const OverflowPolicy    m_policy;
+    mutable std::mutex      m_mu;
+    std::condition_variable m_not_empty;
+    std::condition_variable m_not_full;
+    std::deque<T>           m_q;
+    bool                    m_closed{false};
 };
 
 // Pattern 9 (`QaGuard`): Closes all registered channels BEFORE joining stage threads
@@ -197,25 +197,25 @@ public:
 
     template <typename ChannelT>
     void register_channel(ChannelT& ch) {
-        closers_.emplace_back([&ch]() noexcept {
+        m_closers.emplace_back([&ch]() noexcept {
             try { ch.close(); } catch (...) {}
         });
     }
 
     void add_worker(std::jthread&& worker) {
-        workers_.push_back(std::move(worker));
+        m_workers.push_back(std::move(worker));
     }
 
     ~PipelineStageGuard() noexcept {
-        for (auto& close_fn : closers_) {
+        for (auto& close_fn : m_closers) {
             close_fn();
         }
-        workers_.clear(); // Joins all workers after channels are closed
+        m_workers.clear(); // Joins all workers after channels are closed
     }
 
 private:
-    std::vector<std::function<void()>> closers_;
-    std::vector<std::jthread>          workers_;
+    std::vector<std::function<void()>> m_closers;
+    std::vector<std::jthread>          m_workers;
 };
 
 } // namespace hft

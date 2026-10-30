@@ -31,29 +31,29 @@ public:
     constexpr SharedPtr(std::nullptr_t) noexcept {}
 
     // Exception-safe adopting constructor: deletes raw_ptr if ControlBlock allocation throws
-    explicit SharedPtr(T* raw_ptr) : ptr_(raw_ptr) {
-        if (ptr_ != nullptr) {
+    explicit SharedPtr(T* raw_ptr) : m_ptr(raw_ptr) {
+        if (m_ptr != nullptr) {
             try {
-                ctrl_ = new ControlBlock{1};
+                m_ctrl = new ControlBlock{1};
             } catch (...) {
-                delete ptr_;
-                ptr_ = nullptr;
+                delete m_ptr;
+                m_ptr = nullptr;
                 throw;
             }
         }
     }
 
     // Copy constructor: relaxed increment is sufficient because caller already owns a live ref
-    SharedPtr(const SharedPtr& other) noexcept : ptr_(other.ptr_), ctrl_(other.ctrl_) {
-        if (ctrl_ != nullptr) {
-            ctrl_->ref_count.fetch_add(1, std::memory_order_relaxed);
+    SharedPtr(const SharedPtr& other) noexcept : m_ptr(other.m_ptr), m_ctrl(other.m_ctrl) {
+        if (m_ctrl != nullptr) {
+            m_ctrl->ref_count.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
     // Move constructor: zero atomic traffic
     SharedPtr(SharedPtr&& other) noexcept
-        : ptr_(std::exchange(other.ptr_, nullptr)),
-          ctrl_(std::exchange(other.ctrl_, nullptr)) {}
+        : m_ptr(std::exchange(other.m_ptr, nullptr)),
+          m_ctrl(std::exchange(other.m_ctrl, nullptr)) {}
 
     // Copy assignment (handles self-assignment cleanly via copy-and-swap)
     SharedPtr& operator=(const SharedPtr& other) noexcept {
@@ -68,8 +68,8 @@ public:
     SharedPtr& operator=(SharedPtr&& other) noexcept {
         if (this != &other) {
             release();
-            ptr_ = std::exchange(other.ptr_, nullptr);
-            ctrl_ = std::exchange(other.ctrl_, nullptr);
+            m_ptr = std::exchange(other.m_ptr, nullptr);
+            m_ctrl = std::exchange(other.m_ctrl, nullptr);
         }
         return *this;
     }
@@ -77,8 +77,8 @@ public:
     ~SharedPtr() noexcept { release(); }
 
     void swap(SharedPtr& other) noexcept {
-        std::swap(ptr_, other.ptr_);
-        std::swap(ctrl_, other.ctrl_);
+        std::swap(m_ptr, other.m_ptr);
+        std::swap(m_ctrl, other.m_ctrl);
     }
 
     void reset(T* new_ptr = nullptr) {
@@ -86,13 +86,13 @@ public:
         swap(tmp);
     }
 
-    [[nodiscard]] T* get() const noexcept { return ptr_; }
-    [[nodiscard]] T& operator*() const noexcept { return *ptr_; }
-    [[nodiscard]] T* operator->() const noexcept { return ptr_; }
-    [[nodiscard]] explicit operator bool() const noexcept { return ptr_ != nullptr; }
+    [[nodiscard]] T* get() const noexcept { return m_ptr; }
+    [[nodiscard]] T& operator*() const noexcept { return *m_ptr; }
+    [[nodiscard]] T* operator->() const noexcept { return m_ptr; }
+    [[nodiscard]] explicit operator bool() const noexcept { return m_ptr != nullptr; }
 
     [[nodiscard]] std::size_t use_count() const noexcept {
-        return ctrl_ != nullptr ? ctrl_->ref_count.load(std::memory_order_relaxed) : 0;
+        return m_ctrl != nullptr ? m_ctrl->ref_count.load(std::memory_order_relaxed) : 0;
     }
 
 private:
@@ -101,20 +101,20 @@ private:
     };
 
     void release() noexcept {
-        if (ctrl_ != nullptr) {
-            // acq_rel ensures all prior mutations on *ptr_ across all threads
-            // happen-before the final thread runs `delete ptr_`!
-            if (ctrl_->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                delete ptr_;
-                delete ctrl_;
+        if (m_ctrl != nullptr) {
+            // acq_rel ensures all prior mutations on *m_ptr across all threads
+            // happen-before the final thread runs `delete m_ptr`!
+            if (m_ctrl->ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                delete m_ptr;
+                delete m_ctrl;
             }
-            ptr_ = nullptr;
-            ctrl_ = nullptr;
+            m_ptr = nullptr;
+            m_ctrl = nullptr;
         }
     }
 
-    T* ptr_{nullptr};
-    ControlBlock* ctrl_{nullptr};
+    T* m_ptr{nullptr};
+    ControlBlock* m_ctrl{nullptr};
 };
 
 } // namespace hft

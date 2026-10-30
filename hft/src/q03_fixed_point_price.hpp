@@ -11,9 +11,9 @@
 //   never suffer from IEEE-754 floating-point drift OR silent signed-overflow UB.
 //
 // KEY NUMERIC SAFETY:
-//   1. Why raw `a.raw_ * b.raw_` overflows 64-bit signed ints:
-//      If `Scale = 10,000` and `a = 400,000.0000` (`raw_ = 4,000,000,000`),
-//      `a.raw_ * b.raw_ = 1.6e19 > INT64_MAX`, even though the scaled product
+//   1. Why raw `a.m_raw * b.m_raw` overflows 64-bit signed ints:
+//      If `Scale = 10,000` and `a = 400,000.0000` (`m_raw = 4,000,000,000`),
+//      `a.m_raw * b.m_raw = 1.6e19 > INT64_MAX`, even though the scaled product
 //      (`1.6e15`) easily fits in `int64_t`!
 //      By decomposing `a = q_a * Scale + r_a` and `b = q_b * Scale + r_b`,
 //      we compute `(a * b)` exactly without needing non-standard `__int128`!
@@ -40,7 +40,7 @@ public:
     static constexpr std::int64_t kMinRaw = std::numeric_limits<std::int64_t>::min();
 
     constexpr FixedPrice() noexcept = default;
-    constexpr explicit FixedPrice(std::int64_t raw_scaled) noexcept : raw_(raw_scaled) {}
+    constexpr explicit FixedPrice(std::int64_t raw_scaled) noexcept : m_raw(raw_scaled) {}
 
     [[nodiscard]] static constexpr FixedPrice from_raw(std::int64_t raw_scaled) noexcept {
         return FixedPrice(raw_scaled);
@@ -71,29 +71,29 @@ public:
         return res.value_or(FixedPrice{0});
     }
 
-    [[nodiscard]] constexpr std::int64_t raw() const noexcept { return raw_; }
-    [[nodiscard]] constexpr std::int64_t whole_part() const noexcept { return raw_ / Scale; }
+    [[nodiscard]] constexpr std::int64_t raw() const noexcept { return m_raw; }
+    [[nodiscard]] constexpr std::int64_t whole_part() const noexcept { return m_raw / Scale; }
     [[nodiscard]] constexpr std::int64_t frac_part() const noexcept {
-        const std::int64_t rem = raw_ % Scale;
+        const std::int64_t rem = m_raw % Scale;
         return rem >= 0 ? rem : -rem;
     }
 
     // UB-free checked addition
     [[nodiscard]] static constexpr std::optional<FixedPrice> checked_add(FixedPrice a, FixedPrice b) noexcept {
-        if ((b.raw_ > 0 && a.raw_ > kMaxRaw - b.raw_) ||
-            (b.raw_ < 0 && a.raw_ < kMinRaw - b.raw_)) {
+        if ((b.m_raw > 0 && a.m_raw > kMaxRaw - b.m_raw) ||
+            (b.m_raw < 0 && a.m_raw < kMinRaw - b.m_raw)) {
             return std::nullopt;
         }
-        return FixedPrice(a.raw_ + b.raw_);
+        return FixedPrice(a.m_raw + b.m_raw);
     }
 
     // UB-free checked subtraction
     [[nodiscard]] static constexpr std::optional<FixedPrice> checked_sub(FixedPrice a, FixedPrice b) noexcept {
-        if ((b.raw_ < 0 && a.raw_ > kMaxRaw + b.raw_) ||
-            (b.raw_ > 0 && a.raw_ < kMinRaw + b.raw_)) {
+        if ((b.m_raw < 0 && a.m_raw > kMaxRaw + b.m_raw) ||
+            (b.m_raw > 0 && a.m_raw < kMinRaw + b.m_raw)) {
             return std::nullopt;
         }
-        return FixedPrice(a.raw_ - b.raw_);
+        return FixedPrice(a.m_raw - b.m_raw);
     }
 
     // Portable wide multiplication: decomposes `a = qa*Scale + ra`, `b = qb*Scale + rb`
@@ -101,10 +101,10 @@ public:
     // without overflowing 64-bit signed intermediate products!
     [[nodiscard]] static constexpr std::optional<FixedPrice>
     checked_multiply_prices(FixedPrice a, FixedPrice b) noexcept {
-        const std::int64_t qa = a.raw_ / Scale;
-        const std::int64_t ra = a.raw_ % Scale;
-        const std::int64_t qb = b.raw_ / Scale;
-        const std::int64_t rb = b.raw_ % Scale;
+        const std::int64_t qa = a.m_raw / Scale;
+        const std::int64_t ra = a.m_raw % Scale;
+        const std::int64_t qb = b.m_raw / Scale;
+        const std::int64_t rb = b.m_raw % Scale;
 
         std::int64_t term1 = 0;
         if (!checked_mul_i64(qa, qb, term1) || !checked_mul_i64(term1, Scale, term1)) {
@@ -144,7 +144,7 @@ public:
 
     [[nodiscard]] friend constexpr FixedPrice operator*(FixedPrice px, std::int64_t qty) noexcept {
         std::int64_t out = 0;
-        const bool ok = checked_mul_i64(px.raw_, qty, out);
+        const bool ok = checked_mul_i64(px.m_raw, qty, out);
         assert(ok && "FixedPrice quantity multiplication overflow!");
         return ok ? FixedPrice(out) : FixedPrice{0};
     }
@@ -177,7 +177,7 @@ private:
         return true;
     }
 
-    std::int64_t raw_{0};
+    std::int64_t m_raw{0};
 };
 
 } // namespace hft

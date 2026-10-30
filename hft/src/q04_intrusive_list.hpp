@@ -15,7 +15,7 @@
 //      pointer manipulation in 4 instructions without touching `new`/`delete`.
 //   2. Membership Preconditions & Validation:
 //      - `push_back(node)` requires `node` to be currently detached
-//        (`node->prev == nullptr && node->next == nullptr && node != head_`).
+//        (`node->prev == nullptr && node->next == nullptr && node != m_head`).
 //      - `remove(node)` requires `node` to be currently linked in THIS list.
 // ============================================================================
 
@@ -40,59 +40,59 @@ public:
 
     void push_back(Node* node) noexcept {
         assert(node != nullptr);
-        assert(node->prev == nullptr && node->next == nullptr && node != head_ &&
+        assert(node->prev == nullptr && node->next == nullptr && node != m_head &&
                "Node is already linked in an IntrusiveList!");
 
-        node->prev = tail_;
+        node->prev = m_tail;
         node->next = nullptr;
-        if (tail_ != nullptr) {
-            tail_->next = node;
+        if (m_tail != nullptr) {
+            m_tail->next = node;
         } else {
-            head_ = node;
+            m_head = node;
         }
-        tail_ = node;
-        ++size_;
+        m_tail = node;
+        ++m_size;
     }
 
     void remove(Node* node) noexcept {
-        assert(node != nullptr && size_ > 0);
-        assert((node->prev != nullptr || node == head_) && "Node is not linked in this IntrusiveList!");
+        assert(node != nullptr && m_size > 0);
+        assert((node->prev != nullptr || node == m_head) && "Node is not linked in this IntrusiveList!");
 
         if (node->prev != nullptr) {
             node->prev->next = node->next;
         } else {
-            head_ = node->next;
+            m_head = node->next;
         }
 
         if (node->next != nullptr) {
             node->next->prev = node->prev;
         } else {
-            tail_ = node->prev;
+            m_tail = node->prev;
         }
 
         node->prev = nullptr;
         node->next = nullptr;
-        --size_;
+        --m_size;
     }
 
     [[nodiscard]] Node* pop_front() noexcept {
-        if (head_ == nullptr) {
+        if (m_head == nullptr) {
             return nullptr;
         }
-        Node* first = head_;
+        Node* first = m_head;
         remove(first);
         return first;
     }
 
-    [[nodiscard]] Node* front() const noexcept { return head_; }
-    [[nodiscard]] Node* back() const noexcept { return tail_; }
-    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
-    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    [[nodiscard]] Node* front() const noexcept { return m_head; }
+    [[nodiscard]] Node* back() const noexcept { return m_tail; }
+    [[nodiscard]] bool empty() const noexcept { return m_size == 0; }
+    [[nodiscard]] std::size_t size() const noexcept { return m_size; }
 
 private:
-    Node* head_{nullptr};
-    Node* tail_{nullptr};
-    std::size_t size_{0};
+    Node* m_head{nullptr};
+    Node* m_tail{nullptr};
+    std::size_t m_size{0};
 };
 
 } // namespace hft

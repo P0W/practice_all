@@ -11,10 +11,10 @@
 //   false sharing (Concurrency-Ninja Ch11 Pattern 8).
 //
 // KEY C++20 DESIGN DETAILS:
-//   - Accepts any `Shards > 0` (`hash_(key) % Shards`), matching Ch11 Pattern 8;
+//   - Accepts any `Shards > 0` (`m_hash(key) % Shards`), matching Ch11 Pattern 8;
 //     when `Shards` is a power of two (default 16), the compiler optimizes
 //     `% Shards` into a single bitwise `AND` instruction.
-//   - Conditional `noexcept(noexcept(hash_(key)))` on `shard_for()`.
+//   - Conditional `noexcept(noexcept(m_hash(key)))` on `shard_for()`.
 //   - Note on `total()` snapshot consistency: sums shards sequentially without
 //     a global stop-the-world lock (eventual/relaxed aggregate telemetry).
 // ============================================================================
@@ -63,7 +63,7 @@ public:
     // Non-atomic point-in-time telemetry sum across shards (acquires one shard at a time)
     [[nodiscard]] std::int64_t total() const {
         std::int64_t sum = 0;
-        for (const auto& s : shards_) {
+        for (const auto& s : m_shards) {
             std::shared_lock lk(s.mu);
             for (const auto& [k, v] : s.counts) {
                 sum += v;
@@ -78,16 +78,16 @@ private:
         std::unordered_map<K, std::int64_t, Hash, KeyEqual> counts;
     };
 
-    [[nodiscard]] Shard& shard_for(const K& key) noexcept(noexcept(hash_(key))) {
-        return shards_[hash_(key) % Shards];
+    [[nodiscard]] Shard& shard_for(const K& key) noexcept(noexcept(m_hash(key))) {
+        return m_shards[m_hash(key) % Shards];
     }
 
-    [[nodiscard]] const Shard& shard_for(const K& key) const noexcept(noexcept(hash_(key))) {
-        return shards_[hash_(key) % Shards];
+    [[nodiscard]] const Shard& shard_for(const K& key) const noexcept(noexcept(m_hash(key))) {
+        return m_shards[m_hash(key) % Shards];
     }
 
-    [[no_unique_address]] Hash    hash_{};
-    std::array<Shard, Shards>     shards_{};
+    [[no_unique_address]] Hash    m_hash{};
+    std::array<Shard, Shards>     m_shards{};
 };
 
 } // namespace hft

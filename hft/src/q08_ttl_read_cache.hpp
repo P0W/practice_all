@@ -20,8 +20,8 @@
 //      without mutating the map (preserving full reader concurrency), while
 //      the sweeper thread periodically purges expired entries via `std::erase_if`.
 //   3. Safe Member Destruction Order:
-//      `sweeper_` (`std::jthread`) is declared LAST so its destructor requests
-//      stop and joins BEFORE `rw_mu_` and `map_` are destroyed.
+//      `m_sweeper` (`std::jthread`) is declared LAST so its destructor requests
+//      stop and joins BEFORE `m_rw_mu` and `m_map` are destroyed.
 // ============================================================================
 
 #include <chrono>
@@ -47,58 +47,58 @@ public:
     using Duration  = Clock::duration;
 
     explicit TtlCache(Duration ttl, Duration sweep_interval = std::chrono::milliseconds(50))
-        : ttl_(ttl), sweep_interval_(sweep_interval)
+        : m_ttl(ttl), m_sweep_interval(sweep_interval)
     {
-        if (ttl_ <= Duration::zero()) {
+        if (m_ttl <= Duration::zero()) {
             throw std::invalid_argument("TtlCache: ttl must be > 0");
         }
-        if (sweep_interval_ <= Duration::zero()) {
+        if (m_sweep_interval <= Duration::zero()) {
             throw std::invalid_argument("TtlCache: sweep_interval must be > 0");
         }
-        sweeper_ = std::jthread([this](std::stop_token st) { sweep_loop(st); });
+        m_sweeper = std::jthread([this](std::stop_token st) { sweep_loop(st); });
     }
 
-    ~TtlCache() noexcept = default; // sweeper_ destroyed first -> requests stop & joins
+    ~TtlCache() noexcept = default; // m_sweeper destroyed first -> requests stop & joins
 
     TtlCache(const TtlCache&) = delete;
     TtlCache& operator=(const TtlCache&) = delete;
 
     void put(K key, V value, std::optional<Duration> custom_ttl = std::nullopt) {
-        const Duration effective_ttl = custom_ttl.value_or(ttl_);
+        const Duration effective_ttl = custom_ttl.value_or(m_ttl);
         if (effective_ttl <= Duration::zero()) {
             throw std::invalid_argument("TtlCache::put: custom_ttl must be > 0");
         }
         const TimePoint exp = Clock::now() + effective_ttl;
-        std::unique_lock lk(rw_mu_);
-        map_.insert_or_assign(std::move(key), Entry{std::move(value), exp});
+        std::unique_lock lk(m_rw_mu);
+        m_map.insert_or_assign(std::move(key), Entry{std::move(value), exp});
     }
 
     [[nodiscard]] std::optional<V> get(const K& key) const {
         const TimePoint now = Clock::now();
-        std::shared_lock lk(rw_mu_);
-        auto it = map_.find(key);
-        if (it == map_.end() || now >= it->second.expires_at) {
+        std::shared_lock lk(m_rw_mu);
+        auto it = m_map.find(key);
+        if (it == m_map.end() || now >= it->second.expires_at) {
             return std::nullopt;
         }
         return it->second.value;
     }
 
     bool erase(const K& key) {
-        std::unique_lock lk(rw_mu_);
-        return map_.erase(key) > 0;
+        std::unique_lock lk(m_rw_mu);
+        return m_map.erase(key) > 0;
     }
 
     std::size_t evict_expired() {
         const TimePoint now = Clock::now();
-        std::unique_lock lk(rw_mu_);
-        return std::erase_if(map_, [now](const auto& kv) {
+        std::unique_lock lk(m_rw_mu);
+        return std::erase_if(m_map, [now](const auto& kv) {
             return now >= kv.second.expires_at;
         });
     }
 
     [[nodiscard]] std::size_t size_including_expired() const {
-        std::shared_lock lk(rw_mu_);
-        return map_.size();
+        std::shared_lock lk(m_rw_mu);
+        return m_map.size();
     }
 
 private:
@@ -113,7 +113,7 @@ private:
         while (!st.stop_requested()) {
             {
                 std::unique_lock lk(sleep_mu);
-                sleep_cv.wait_for(lk, st, sweep_interval_, [] { return false; });
+                sleep_cv.wait_for(lk, st, m_sweep_interval, [] { return false; });
             }
             if (st.stop_requested()) {
                 break;
@@ -122,11 +122,11 @@ private:
         }
     }
 
-    const Duration                                ttl_;
-    const Duration                                sweep_interval_;
-    mutable std::shared_mutex                     rw_mu_;
-    std::unordered_map<K, Entry, Hash, KeyEqual>  map_;
-    std::jthread                                  sweeper_; // MUST BE LAST
+    const Duration                                m_ttl;
+    const Duration                                m_sweep_interval;
+    mutable std::shared_mutex                     m_rw_mu;
+    std::unordered_map<K, Entry, Hash, KeyEqual>  m_map;
+    std::jthread                                  m_sweeper; // MUST BE LAST
 };
 
 } // namespace hft

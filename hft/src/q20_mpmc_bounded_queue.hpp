@@ -53,7 +53,7 @@ public:
 
     MpmcBoundedQueue() noexcept {
         for (std::size_t i = 0; i < Capacity; ++i) {
-            slots_[i].sequence.store(i, std::memory_order_relaxed);
+            m_slots[i].sequence.store(i, std::memory_order_relaxed);
         }
     }
 
@@ -88,23 +88,23 @@ public:
 
     [[nodiscard]] std::optional<T> try_pop() noexcept {
         Slot* slot = nullptr;
-        std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
+        std::size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
 
         for (;;) {
-            slot = &slots_[pos & kMask];
+            slot = &m_slots[pos & kMask];
             const std::size_t seq = slot->sequence.load(std::memory_order_acquire);
             // Unsigned subtraction first -> well-defined modular distance without signed overflow UB
             const auto diff = static_cast<std::intptr_t>(seq - (pos + 1));
 
             if (diff == 0) [[likely]] {
-                if (dequeue_pos_.compare_exchange_weak(
+                if (m_dequeue_pos.compare_exchange_weak(
                         pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
                     break;
                 }
             } else if (diff < 0) {
                 return std::nullopt; // Slot not yet published (queue empty or producer still writing)
             } else {
-                pos = dequeue_pos_.load(std::memory_order_relaxed);
+                pos = m_dequeue_pos.load(std::memory_order_relaxed);
             }
         }
 
@@ -119,23 +119,23 @@ private:
     template <typename U>
     [[nodiscard]] bool emplace_impl(U&& arg) noexcept {
         Slot* slot = nullptr;
-        std::size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
+        std::size_t pos = m_enqueue_pos.load(std::memory_order_relaxed);
 
         for (;;) {
-            slot = &slots_[pos & kMask];
+            slot = &m_slots[pos & kMask];
             const std::size_t seq = slot->sequence.load(std::memory_order_acquire);
             // Unsigned subtraction first -> well-defined modular distance
             const auto diff = static_cast<std::intptr_t>(seq - pos);
 
             if (diff == 0) [[likely]] {
-                if (enqueue_pos_.compare_exchange_weak(
+                if (m_enqueue_pos.compare_exchange_weak(
                         pos, pos + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
                     break;
                 }
             } else if (diff < 0) {
                 return false; // Queue full: `arg` is untouched!
             } else {
-                pos = enqueue_pos_.load(std::memory_order_relaxed);
+                pos = m_enqueue_pos.load(std::memory_order_relaxed);
             }
         }
 
@@ -149,9 +149,9 @@ private:
         alignas(T) std::byte storage[sizeof(T)];
     };
 
-    alignas(kSlotAlign) std::array<Slot, Capacity> slots_{};
-    alignas(kMpmcCacheLine) std::atomic<std::size_t> enqueue_pos_{0};
-    alignas(kMpmcCacheLine) std::atomic<std::size_t> dequeue_pos_{0};
+    alignas(kSlotAlign) std::array<Slot, Capacity> m_slots{};
+    alignas(kMpmcCacheLine) std::atomic<std::size_t> m_enqueue_pos{0};
+    alignas(kMpmcCacheLine) std::atomic<std::size_t> m_dequeue_pos{0};
 };
 
 } // namespace hft

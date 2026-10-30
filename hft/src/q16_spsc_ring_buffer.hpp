@@ -12,7 +12,7 @@
 //      immediately (matching Concurrency-Ninja Ch11 Pattern 1).
 //   2. Non-destructive failed push: `try_push(T&&)` only moves from `item`
 //      AFTER verifying a slot is free.
-//   3. Shadow-index caching (`read_idx_cache_`, `write_idx_cache_`) on separate
+//   3. Shadow-index caching (`m_read_idx_cache`, `m_write_idx_cache`) on separate
 //      64-byte cache lines to eliminate false sharing and cross-core L1 invalidation.
 //   4. Supports over-aligned types (`alignof(T) > 64`) via `std::max`.
 //   (Contrast: Q20 covers MPMC per-slot sequence CAS; Q10 covers blocking back-pressure.)
@@ -42,8 +42,8 @@ public:
     constexpr SpscRingBuffer() noexcept = default;
 
     ~SpscRingBuffer() noexcept {
-        std::size_t r = read_idx_.load(std::memory_order_relaxed);
-        const std::size_t w = write_idx_.load(std::memory_order_relaxed);
+        std::size_t r = m_read_idx.load(std::memory_order_relaxed);
+        const std::size_t w = m_write_idx.load(std::memory_order_relaxed);
         while (r != w) {
             std::destroy_at(slot_ptr(r));
             ++r;
@@ -57,23 +57,23 @@ public:
     [[nodiscard]] bool try_push(const T& item) noexcept(std::is_nothrow_copy_constructible_v<T>)
         requires std::is_copy_constructible_v<T>
     {
-        const std::size_t w = write_idx_.load(std::memory_order_relaxed);
+        const std::size_t w = m_write_idx.load(std::memory_order_relaxed);
         if (!has_space(w)) [[unlikely]] {
             return false;
         }
-        std::construct_at(reinterpret_cast<T*>(slots_[w & kMask].storage), item);
-        write_idx_.store(w + 1, std::memory_order_release);
+        std::construct_at(reinterpret_cast<T*>(m_slots[w & kMask].storage), item);
+        m_write_idx.store(w + 1, std::memory_order_release);
         return true;
     }
 
     // PRODUCER ONLY — Wait-free O(1) move push (leaves `item` intact if full!)
     [[nodiscard]] bool try_push(T&& item) noexcept {
-        const std::size_t w = write_idx_.load(std::memory_order_relaxed);
+        const std::size_t w = m_write_idx.load(std::memory_order_relaxed);
         if (!has_space(w)) [[unlikely]] {
             return false; // Full: `item` is NOT moved from!
         }
-        std::construct_at(reinterpret_cast<T*>(slots_[w & kMask].storage), std::move(item));
-        write_idx_.store(w + 1, std::memory_order_release);
+        std::construct_at(reinterpret_cast<T*>(m_slots[w & kMask].storage), std::move(item));
+        m_write_idx.store(w + 1, std::memory_order_release);
         return true;
     }
 
@@ -91,10 +91,10 @@ public:
 
     // CONSUMER ONLY — Wait-free O(1) pop returning std::optional<T> (supports non-default-constructible T)
     [[nodiscard]] std::optional<T> try_pop() noexcept {
-        const std::size_t r = read_idx_.load(std::memory_order_relaxed);
-        if (r == write_idx_cache_) [[unlikely]] {
-            write_idx_cache_ = write_idx_.load(std::memory_order_acquire);
-            if (r == write_idx_cache_) [[unlikely]] {
+        const std::size_t r = m_read_idx.load(std::memory_order_relaxed);
+        if (r == m_write_idx_cache) [[unlikely]] {
+            m_write_idx_cache = m_write_idx.load(std::memory_order_acquire);
+            if (r == m_write_idx_cache) [[unlikely]] {
                 return std::nullopt;
             }
         }
@@ -102,14 +102,14 @@ public:
         T* ptr = slot_ptr(r);
         std::optional<T> result(std::move(*ptr));
         std::destroy_at(ptr);
-        read_idx_.store(r + 1, std::memory_order_release);
+        m_read_idx.store(r + 1, std::memory_order_release);
         return result;
     }
 
     // Approximate size (clamped against concurrent wrap/underflow)
     [[nodiscard]] std::size_t size_approx() const noexcept {
-        const std::size_t r = read_idx_.load(std::memory_order_acquire);
-        const std::size_t w = write_idx_.load(std::memory_order_acquire);
+        const std::size_t r = m_read_idx.load(std::memory_order_acquire);
+        const std::size_t w = m_write_idx.load(std::memory_order_acquire);
         const std::size_t diff = w - r;
         return diff <= Capacity ? diff : 0;
     }
@@ -122,9 +122,9 @@ private:
     };
 
     [[nodiscard]] bool has_space(std::size_t w) noexcept {
-        if (w - read_idx_cache_ == Capacity) [[unlikely]] {
-            read_idx_cache_ = read_idx_.load(std::memory_order_acquire);
-            if (w - read_idx_cache_ == Capacity) [[unlikely]] {
+        if (w - m_read_idx_cache == Capacity) [[unlikely]] {
+            m_read_idx_cache = m_read_idx.load(std::memory_order_acquire);
+            if (w - m_read_idx_cache == Capacity) [[unlikely]] {
                 return false;
             }
         }
@@ -132,16 +132,16 @@ private:
     }
 
     [[nodiscard]] T* slot_ptr(std::size_t idx) noexcept {
-        return std::launder(reinterpret_cast<T*>(slots_[idx & kMask].storage));
+        return std::launder(reinterpret_cast<T*>(m_slots[idx & kMask].storage));
     }
 
-    alignas(kCacheLineSize) std::atomic<std::size_t> write_idx_{0};
-    std::size_t read_idx_cache_{0};
+    alignas(kCacheLineSize) std::atomic<std::size_t> m_write_idx{0};
+    std::size_t m_read_idx_cache{0};
 
-    alignas(kCacheLineSize) std::atomic<std::size_t> read_idx_{0};
-    std::size_t write_idx_cache_{0};
+    alignas(kCacheLineSize) std::atomic<std::size_t> m_read_idx{0};
+    std::size_t m_write_idx_cache{0};
 
-    alignas(kSlotAlign) std::array<RawSlot, Capacity> slots_{};
+    alignas(kSlotAlign) std::array<RawSlot, Capacity> m_slots{};
 };
 
 } // namespace hft

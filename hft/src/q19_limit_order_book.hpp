@@ -19,7 +19,7 @@
 //        **$O(1)$**, and only touches `std::map::erase(price)` ($O(\log L)$ where
 //        $L$ is active price levels) when `node->level->orders.empty()`!
 //   2. Transactional Exception Safety on `add_order`:
-//      Looks up/creates the `PriceLevel` and inserts into `order_index_` with
+//      Looks up/creates the `PriceLevel` and inserts into `m_order_index` with
 //      full rollback if any container allocation fails, never leaking a pool
 //      slot or leaving a dangling index entry.
 // ============================================================================
@@ -59,18 +59,18 @@ struct PriceLevel {
 template <std::size_t MaxOrders = 65536>
 class LimitOrderBook {
 public:
-    LimitOrderBook() { order_index_.reserve(MaxOrders); }
+    LimitOrderBook() { m_order_index.reserve(MaxOrders); }
 
     LimitOrderBook(const LimitOrderBook&) = delete;
     LimitOrderBook& operator=(const LimitOrderBook&) = delete;
 
     // Add resting order: O(log L) to locate/insert price level + O(1) pool & FIFO append
     [[nodiscard]] bool add_order(std::uint64_t order_id, Side side, std::int64_t price, std::uint32_t qty) {
-        if (qty == 0 || order_index_.contains(order_id)) [[unlikely]] {
+        if (qty == 0 || m_order_index.contains(order_id)) [[unlikely]] {
             return false;
         }
 
-        OrderNode* node = pool_.allocate(order_id, price, qty, side, nullptr, nullptr, nullptr);
+        OrderNode* node = m_pool.allocate(order_id, price, qty, side, nullptr, nullptr, nullptr);
         if (node == nullptr) [[unlikely]] {
             return false;
         }
@@ -80,24 +80,24 @@ public:
 
         try {
             if (side == Side::Buy) {
-                auto [it, inserted] = bids_.try_emplace(price);
+                auto [it, inserted] = m_bids.try_emplace(price);
                 if (inserted) it->second.price = price;
                 lvl_ptr = &it->second;
                 created_new_level = inserted;
             } else {
-                auto [it, inserted] = asks_.try_emplace(price);
+                auto [it, inserted] = m_asks.try_emplace(price);
                 if (inserted) it->second.price = price;
                 lvl_ptr = &it->second;
                 created_new_level = inserted;
             }
 
-            order_index_.emplace(order_id, node);
+            m_order_index.emplace(order_id, node);
         } catch (...) {
             if (created_new_level) {
-                if (side == Side::Buy) bids_.erase(price);
-                else asks_.erase(price);
+                if (side == Side::Buy) m_bids.erase(price);
+                else m_asks.erase(price);
             }
-            pool_.deallocate(node);
+            m_pool.deallocate(node);
             throw;
         }
 
@@ -110,30 +110,30 @@ public:
     // Cancel order by ID: O(1) via cached PriceLevel* when level stays non-empty;
     // O(log L) only when erasing an exhausted price level.
     [[nodiscard]] bool cancel_order(std::uint64_t order_id) {
-        auto it = order_index_.find(order_id);
-        if (it == order_index_.end()) [[unlikely]] {
+        auto it = m_order_index.find(order_id);
+        if (it == m_order_index.end()) [[unlikely]] {
             return false;
         }
 
         OrderNode* node = it->second;
-        order_index_.erase(it);
+        m_order_index.erase(it);
         unlink_and_cleanup_level(node);
-        pool_.deallocate(node);
+        m_pool.deallocate(node);
         return true;
     }
 
     // Reduce quantity in strict O(1) while preserving FIFO queue position!
     [[nodiscard]] bool reduce_order_qty(std::uint64_t order_id, std::uint32_t reduce_by) {
-        auto it = order_index_.find(order_id);
-        if (it == order_index_.end() || reduce_by == 0) [[unlikely]] {
+        auto it = m_order_index.find(order_id);
+        if (it == m_order_index.end() || reduce_by == 0) [[unlikely]] {
             return false;
         }
 
         OrderNode* node = it->second;
         if (reduce_by >= node->qty) {
-            order_index_.erase(it);
+            m_order_index.erase(it);
             unlink_and_cleanup_level(node);
-            pool_.deallocate(node);
+            m_pool.deallocate(node);
             return true;
         }
 
@@ -147,21 +147,21 @@ public:
         std::uint32_t filled_qty = 0;
 
         if (aggressor_side == Side::Buy) {
-            while (requested_qty > 0 && !asks_.empty()) {
-                auto lvl_it = asks_.begin();
+            while (requested_qty > 0 && !m_asks.empty()) {
+                auto lvl_it = m_asks.begin();
                 PriceLevel& lvl = lvl_it->second;
                 sweep_level(lvl, requested_qty, filled_qty);
                 if (lvl.orders.empty()) {
-                    asks_.erase(lvl_it);
+                    m_asks.erase(lvl_it);
                 }
             }
         } else {
-            while (requested_qty > 0 && !bids_.empty()) {
-                auto lvl_it = bids_.begin();
+            while (requested_qty > 0 && !m_bids.empty()) {
+                auto lvl_it = m_bids.begin();
                 PriceLevel& lvl = lvl_it->second;
                 sweep_level(lvl, requested_qty, filled_qty);
                 if (lvl.orders.empty()) {
-                    bids_.erase(lvl_it);
+                    m_bids.erase(lvl_it);
                 }
             }
         }
@@ -170,26 +170,26 @@ public:
     }
 
     [[nodiscard]] std::optional<std::int64_t> best_bid() const noexcept {
-        if (bids_.empty()) return std::nullopt;
-        return bids_.begin()->first;
+        if (m_bids.empty()) return std::nullopt;
+        return m_bids.begin()->first;
     }
 
     [[nodiscard]] std::optional<std::int64_t> best_ask() const noexcept {
-        if (asks_.empty()) return std::nullopt;
-        return asks_.begin()->first;
+        if (m_asks.empty()) return std::nullopt;
+        return m_asks.begin()->first;
     }
 
     [[nodiscard]] std::uint64_t level_qty(Side side, std::int64_t price) const noexcept {
         if (side == Side::Buy) {
-            auto it = bids_.find(price);
-            return it != bids_.end() ? it->second.total_qty : 0ULL;
+            auto it = m_bids.find(price);
+            return it != m_bids.end() ? it->second.total_qty : 0ULL;
         } else {
-            auto it = asks_.find(price);
-            return it != asks_.end() ? it->second.total_qty : 0ULL;
+            auto it = m_asks.find(price);
+            return it != m_asks.end() ? it->second.total_qty : 0ULL;
         }
     }
 
-    [[nodiscard]] std::size_t active_order_count() const noexcept { return order_index_.size(); }
+    [[nodiscard]] std::size_t active_order_count() const noexcept { return m_order_index.size(); }
 
 private:
     void sweep_level(PriceLevel& lvl, std::uint32_t& requested_qty, std::uint32_t& filled_qty) {
@@ -203,8 +203,8 @@ private:
 
             if (head->qty == 0) {
                 lvl.orders.remove(head);
-                order_index_.erase(head->order_id);
-                pool_.deallocate(head);
+                m_order_index.erase(head->order_id);
+                m_pool.deallocate(head);
             }
         }
     }
@@ -215,17 +215,17 @@ private:
         lvl->orders.remove(node);
         if (lvl->orders.empty()) {
             if (node->side == Side::Buy) {
-                bids_.erase(node->price);
+                m_bids.erase(node->price);
             } else {
-                asks_.erase(node->price);
+                m_asks.erase(node->price);
             }
         }
     }
 
-    FixedObjectPool<OrderNode, MaxOrders> pool_{};
-    std::unordered_map<std::uint64_t, OrderNode*> order_index_{};
-    std::map<std::int64_t, PriceLevel, std::greater<std::int64_t>> bids_{};
-    std::map<std::int64_t, PriceLevel, std::less<std::int64_t>> asks_{};
+    FixedObjectPool<OrderNode, MaxOrders> m_pool{};
+    std::unordered_map<std::uint64_t, OrderNode*> m_order_index{};
+    std::map<std::int64_t, PriceLevel, std::greater<std::int64_t>> m_bids{};
+    std::map<std::int64_t, PriceLevel, std::less<std::int64_t>> m_asks{};
 };
 
 } // namespace hft

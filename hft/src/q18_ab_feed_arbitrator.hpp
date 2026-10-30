@@ -7,10 +7,10 @@
 // EXCLUSIVE PROBLEM SCOPE (NON-OVERLAPPING):
 //   Single-threaded, deterministic UDP multicast feed arbitrator across two
 //   redundant exchange lines (**Line A** and **Line B**), implementing:
-//   1. **First-Arrival Dispatch**: Whichever line delivers `expected_seq_`
+//   1. **First-Arrival Dispatch**: Whichever line delivers `m_expected_seq`
 //      first is immediately forwarded to the strategy callback.
 //   2. **Wrap-Safe Modular Sequence Deduplication**: Uses signed 2's-complement
-//      distance `static_cast<std::int64_t>(seq - expected_seq_) < 0` so even
+//      distance `static_cast<std::int64_t>(seq - m_expected_seq) < 0` so even
 //      `uint64_t` rollover is handled cleanly without wraparound bugs!
 //   3. **Bounded Out-of-Order Reassembly Ring**: Buffers early future packets
 //      (`0 < diff < WindowSize`) in `std::optional<PacketT>` slots (requiring
@@ -45,7 +45,7 @@ public:
     static constexpr std::size_t kMask = WindowSize - 1;
 
     constexpr explicit AbFeedArbitrator(std::uint64_t initial_expected_seq = 1) noexcept
-        : expected_seq_(initial_expected_seq) {}
+        : m_expected_seq(initial_expected_seq) {}
 
     template <typename Callback>
         requires std::invocable<Callback&, const PacketT&, FeedLine>
@@ -57,11 +57,11 @@ public:
                                       std::is_nothrow_invocable_v<Callback&, const PacketT&, FeedLine>)
     {
         // Modular signed distance handles uint64_t sequence rollover cleanly
-        const auto signed_diff = static_cast<std::int64_t>(seq - expected_seq_);
+        const auto signed_diff = static_cast<std::int64_t>(seq - m_expected_seq);
 
-        // 1. Old/duplicate sequence number (< expected_seq_ in modular space)
+        // 1. Old/duplicate sequence number (< m_expected_seq in modular space)
         if (signed_diff < 0) {
-            ++duplicates_dropped_;
+            ++m_duplicates_dropped;
             return FeedStatus::DuplicateIgnored;
         }
 
@@ -69,7 +69,7 @@ public:
         if (signed_diff == 0) [[likely]] {
             record_line_win(line);
             callback(pkt, line);
-            ++expected_seq_;
+            ++m_expected_seq;
 
             drain_staged(callback);
             return FeedStatus::ProcessedInOrder;
@@ -78,18 +78,18 @@ public:
         // 3. Future sequence: check if within bounded reorder window
         const auto delta = static_cast<std::uint64_t>(signed_diff);
         if (delta >= WindowSize) [[unlikely]] {
-            ++gap_alerts_;
+            ++m_gap_alerts;
             return FeedStatus::UnrecoverableGap;
         }
 
-        Slot& slot = ring_[seq & kMask];
+        Slot& slot = m_ring[seq & kMask];
         if (slot.packet.has_value() && slot.seq == seq) {
-            ++duplicates_dropped_;
+            ++m_duplicates_dropped;
             return FeedStatus::DuplicateIgnored;
         }
 
         if (!slot.packet.has_value()) {
-            ++buffered_count_;
+            ++m_buffered_count;
         }
         slot.seq  = seq;
         slot.line = line;
@@ -98,19 +98,19 @@ public:
     }
 
     void reset_expected_seq(std::uint64_t new_seq) noexcept {
-        expected_seq_ = new_seq;
-        buffered_count_ = 0;
-        for (auto& s : ring_) {
+        m_expected_seq = new_seq;
+        m_buffered_count = 0;
+        for (auto& s : m_ring) {
             s.packet.reset();
         }
     }
 
-    [[nodiscard]] std::uint64_t expected_seq() const noexcept { return expected_seq_; }
-    [[nodiscard]] std::uint64_t duplicates_dropped() const noexcept { return duplicates_dropped_; }
-    [[nodiscard]] std::size_t buffered_count() const noexcept { return buffered_count_; }
-    [[nodiscard]] std::uint64_t line_a_wins() const noexcept { return line_a_wins_; }
-    [[nodiscard]] std::uint64_t line_b_wins() const noexcept { return line_b_wins_; }
-    [[nodiscard]] std::uint64_t gap_alerts() const noexcept { return gap_alerts_; }
+    [[nodiscard]] std::uint64_t expected_seq() const noexcept { return m_expected_seq; }
+    [[nodiscard]] std::uint64_t duplicates_dropped() const noexcept { return m_duplicates_dropped; }
+    [[nodiscard]] std::size_t buffered_count() const noexcept { return m_buffered_count; }
+    [[nodiscard]] std::uint64_t line_a_wins() const noexcept { return m_line_a_wins; }
+    [[nodiscard]] std::uint64_t line_b_wins() const noexcept { return m_line_b_wins; }
+    [[nodiscard]] std::uint64_t gap_alerts() const noexcept { return m_gap_alerts; }
 
 private:
     struct Slot {
@@ -120,8 +120,8 @@ private:
     };
 
     void record_line_win(FeedLine line) noexcept {
-        if (line == FeedLine::LineA) ++line_a_wins_;
-        else ++line_b_wins_;
+        if (line == FeedLine::LineA) ++m_line_a_wins;
+        else ++m_line_b_wins;
     }
 
     template <typename Callback>
@@ -129,26 +129,26 @@ private:
         std::is_nothrow_invocable_v<Callback&, const PacketT&, FeedLine>)
     {
         for (;;) {
-            Slot& next_slot = ring_[expected_seq_ & kMask];
-            if (!next_slot.packet.has_value() || next_slot.seq != expected_seq_) {
+            Slot& next_slot = m_ring[m_expected_seq & kMask];
+            if (!next_slot.packet.has_value() || next_slot.seq != m_expected_seq) {
                 break;
             }
             record_line_win(next_slot.line);
             PacketT staged_pkt = std::move(*next_slot.packet);
             next_slot.packet.reset();
-            --buffered_count_;
-            ++expected_seq_;
+            --m_buffered_count;
+            ++m_expected_seq;
             callback(staged_pkt, next_slot.line);
         }
     }
 
-    std::uint64_t expected_seq_{1};
-    std::uint64_t duplicates_dropped_{0};
-    std::size_t buffered_count_{0};
-    std::uint64_t line_a_wins_{0};
-    std::uint64_t line_b_wins_{0};
-    std::uint64_t gap_alerts_{0};
-    std::array<Slot, WindowSize> ring_{};
+    std::uint64_t m_expected_seq{1};
+    std::uint64_t m_duplicates_dropped{0};
+    std::size_t m_buffered_count{0};
+    std::uint64_t m_line_a_wins{0};
+    std::uint64_t m_line_b_wins{0};
+    std::uint64_t m_gap_alerts{0};
+    std::array<Slot, WindowSize> m_ring{};
 };
 
 } // namespace hft

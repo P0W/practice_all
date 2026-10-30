@@ -50,16 +50,16 @@ public:
 class SpreadSignalStrategy : public CrtpStrategyBase<SpreadSignalStrategy> {
 public:
     constexpr explicit SpreadSignalStrategy(std::int64_t max_spread) noexcept
-        : max_spread_(max_spread) {}
+        : m_max_spread(max_spread) {}
 
     [[nodiscard]] constexpr std::int64_t on_tick_impl(const MarketTick& tick) const noexcept {
-        if (tick.ask_price <= tick.bid_price || max_spread_ <= 0) {
+        if (tick.ask_price <= tick.bid_price || m_max_spread <= 0) {
             return 0;
         }
         // Compute unsigned spread safely to prevent signed subtraction overflow
         const std::uint64_t u_spread =
             static_cast<std::uint64_t>(tick.ask_price) - static_cast<std::uint64_t>(tick.bid_price);
-        if (u_spread > static_cast<std::uint64_t>(max_spread_)) {
+        if (u_spread > static_cast<std::uint64_t>(m_max_spread)) {
             return 0;
         }
 
@@ -81,7 +81,7 @@ public:
     }
 
 private:
-    std::int64_t max_spread_;
+    std::int64_t m_max_spread;
 };
 
 template <TickStrategyConcept Strategy>

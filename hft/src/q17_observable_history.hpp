@@ -87,14 +87,14 @@ public:
         std::shared_ptr<const Node> new_head;
         std::vector<Callback>       cbs;
         {
-            std::unique_lock lk(mu_);
-            auto cur = head_.load(std::memory_order_relaxed);
+            std::unique_lock lk(m_mu);
+            auto cur = m_head.load(std::memory_order_relaxed);
             const std::size_t next_ver = cur ? (cur->version + 1) : 1;
             new_head = std::make_shared<const Node>(std::move(val), std::move(cur), next_ver);
-            head_.store(new_head, std::memory_order_release);
+            m_head.store(new_head, std::memory_order_release);
 
-            cbs.reserve(observers_.size());
-            for (const auto& [id, cb] : observers_) {
+            cbs.reserve(m_observers.size());
+            for (const auto& [id, cb] : m_observers) {
                 cbs.push_back(cb);
             }
         }
@@ -107,35 +107,35 @@ public:
 
     // O(1) Wait-free snapshot acquisition
     [[nodiscard]] std::shared_ptr<const Node> snapshot() const noexcept {
-        return head_.load(std::memory_order_acquire);
+        return m_head.load(std::memory_order_acquire);
     }
 
     // O(1) Rollback to an earlier snapshot node
     void rollback(std::shared_ptr<const Node> target) noexcept {
-        std::unique_lock lk(mu_);
-        head_.store(std::move(target), std::memory_order_release);
+        std::unique_lock lk(m_mu);
+        m_head.store(std::move(target), std::memory_order_release);
     }
 
     ObserverId subscribe(Callback cb) {
-        std::unique_lock lk(mu_);
-        const ObserverId id = ++next_observer_id_;
-        observers_.emplace_back(id, std::move(cb));
+        std::unique_lock lk(m_mu);
+        const ObserverId id = ++m_next_observer_id;
+        m_observers.emplace_back(id, std::move(cb));
         return id;
     }
 
     bool unsubscribe(ObserverId id) {
-        std::unique_lock lk(mu_);
-        const auto erased = std::erase_if(observers_, [id](const auto& pair) {
+        std::unique_lock lk(m_mu);
+        const auto erased = std::erase_if(m_observers, [id](const auto& pair) {
             return pair.first == id;
         });
         return erased > 0;
     }
 
 private:
-    mutable std::mutex                             mu_;
-    std::atomic<std::shared_ptr<const Node>>       head_{nullptr};
-    ObserverId                                     next_observer_id_{0};
-    std::vector<std::pair<ObserverId, Callback>>   observers_;
+    mutable std::mutex                             m_mu;
+    std::atomic<std::shared_ptr<const Node>>       m_head{nullptr};
+    ObserverId                                     m_next_observer_id{0};
+    std::vector<std::pair<ObserverId, Callback>>   m_observers;
 };
 
 } // namespace hft

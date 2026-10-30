@@ -12,10 +12,10 @@
 //
 // KEY LIFETIME INVARIANTS:
 //   1. Reverse Member Destruction Order:
-//      `workers_` is declared LAST so `~ThreadPool()` joins all `std::jthread`
-//      workers BEFORE `mu_`, `cv_`, `q_`, and `stop_` are destroyed.
+//      `m_workers` is declared LAST so `~ThreadPool()` joins all `std::jthread`
+//      workers BEFORE `m_mu`, `m_cv`, `m_q`, and `m_stop` are destroyed.
 //   2. Explicit Shutdown Policy (`DrainQueued` vs. `DiscardQueued`):
-//      - `DrainQueued` (default): completes all accepted tasks in `q_` before
+//      - `DrainQueued` (default): completes all accepted tasks in `m_q` before
 //        workers exit.
 //      - `DiscardQueued`: exits immediately after in-flight tasks finish;
 //        unrun queued tasks break their `std::packaged_task` promises cleanly.
@@ -45,24 +45,24 @@ class ThreadPool {
 public:
     explicit ThreadPool(std::size_t num_workers,
                         PoolShutdownPolicy policy = PoolShutdownPolicy::DrainQueued)
-        : policy_(policy)
+        : m_policy(policy)
     {
         if (num_workers == 0) {
             throw std::invalid_argument("ThreadPool: num_workers must be > 0");
         }
-        workers_.reserve(num_workers);
+        m_workers.reserve(num_workers);
         for (std::size_t i = 0; i < num_workers; ++i) {
-            workers_.emplace_back([this](std::stop_token st) { worker_loop(st); });
+            m_workers.emplace_back([this](std::stop_token st) { worker_loop(st); });
         }
     }
 
     ~ThreadPool() noexcept {
         {
-            std::unique_lock lk(mu_);
-            stop_ = true;
+            std::unique_lock lk(m_mu);
+            m_stop = true;
         }
-        cv_.notify_all();
-        workers_.clear(); // Joins all worker jthreads while mu_/cv_/q_ remain valid
+        m_cv.notify_all();
+        m_workers.clear(); // Joins all worker jthreads while m_mu/m_cv/m_q remain valid
     }
 
     ThreadPool(const ThreadPool&) = delete;
@@ -82,19 +82,19 @@ public:
         auto fut  = task->get_future();
 
         {
-            std::unique_lock lk(mu_);
-            if (stop_) {
+            std::unique_lock lk(m_mu);
+            if (m_stop) {
                 throw std::runtime_error("ThreadPool: cannot submit while shutting down");
             }
-            q_.push([task]() { (*task)(); });
+            m_q.push([task]() { (*task)(); });
         }
-        cv_.notify_one();
+        m_cv.notify_one();
         return fut;
     }
 
     [[nodiscard]] std::size_t pending_count() const {
-        std::unique_lock lk(mu_);
-        return q_.size();
+        std::unique_lock lk(m_mu);
+        return m_q.size();
     }
 
 private:
@@ -102,34 +102,34 @@ private:
         for (;;) {
             std::function<void()> task;
             {
-                std::unique_lock lk(mu_);
-                if (!cv_.wait(lk, st, [this] { return stop_ || !q_.empty(); })) {
+                std::unique_lock lk(m_mu);
+                if (!m_cv.wait(lk, st, [this] { return m_stop || !m_q.empty(); })) {
                     // Interrupted by external stop_token (e.g., constructor throw unwind)
-                    if (policy_ == PoolShutdownPolicy::DiscardQueued || q_.empty()) {
+                    if (m_policy == PoolShutdownPolicy::DiscardQueued || m_q.empty()) {
                         return;
                     }
                 }
-                if (stop_) {
-                    if (policy_ == PoolShutdownPolicy::DiscardQueued || q_.empty()) {
+                if (m_stop) {
+                    if (m_policy == PoolShutdownPolicy::DiscardQueued || m_q.empty()) {
                         return;
                     }
                 }
-                if (q_.empty()) {
+                if (m_q.empty()) {
                     continue;
                 }
-                task = std::move(q_.front());
-                q_.pop();
+                task = std::move(m_q.front());
+                m_q.pop();
             }
             task();
         }
     }
 
-    const PoolShutdownPolicy          policy_;
-    mutable std::mutex                mu_;
-    std::condition_variable_any       cv_;
-    std::queue<std::function<void()>> q_;
-    bool                              stop_{false};
-    std::vector<std::jthread>         workers_; // MUST BE LAST
+    const PoolShutdownPolicy          m_policy;
+    mutable std::mutex                m_mu;
+    std::condition_variable_any       m_cv;
+    std::queue<std::function<void()>> m_q;
+    bool                              m_stop{false};
+    std::vector<std::jthread>         m_workers; // MUST BE LAST
 };
 
 } // namespace hft

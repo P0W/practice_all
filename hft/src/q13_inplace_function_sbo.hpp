@@ -55,9 +55,9 @@ public:
         static_assert(std::is_nothrow_move_constructible_v<Decayed>,
                       "Callable must be nothrow move constructible!");
 
-        std::construct_at(reinterpret_cast<Decayed*>(storage_), std::forward<F>(func));
+        std::construct_at(reinterpret_cast<Decayed*>(m_storage), std::forward<F>(func));
 
-        invoker_ = [](void* ptr, Args... args) -> Ret {
+        m_invoker = [](void* ptr, Args... args) -> Ret {
             auto* callable = std::launder(reinterpret_cast<Decayed*>(ptr));
             if constexpr (std::is_void_v<Ret>) {
                 std::invoke(*callable, std::forward<Args>(args)...);
@@ -66,7 +66,7 @@ public:
             }
         };
 
-        manager_ = [](void* dst, void* src) noexcept {
+        m_manager = [](void* dst, void* src) noexcept {
             auto* src_obj = std::launder(reinterpret_cast<Decayed*>(src));
             if (dst != nullptr) {
                 std::construct_at(reinterpret_cast<Decayed*>(dst), std::move(*src_obj));
@@ -91,17 +91,17 @@ public:
     ~InplaceFunction() noexcept { reset(); }
 
     Ret operator()(Args... args) {
-        assert(invoker_ != nullptr && "InplaceFunction invoked when empty!");
-        return invoker_(storage_, std::forward<Args>(args)...);
+        assert(m_invoker != nullptr && "InplaceFunction invoked when empty!");
+        return m_invoker(m_storage, std::forward<Args>(args)...);
     }
 
-    [[nodiscard]] explicit constexpr operator bool() const noexcept { return invoker_ != nullptr; }
+    [[nodiscard]] explicit constexpr operator bool() const noexcept { return m_invoker != nullptr; }
 
     void reset() noexcept {
-        if (manager_ != nullptr) {
-            manager_(nullptr, storage_);
-            invoker_ = nullptr;
-            manager_ = nullptr;
+        if (m_manager != nullptr) {
+            m_manager(nullptr, m_storage);
+            m_invoker = nullptr;
+            m_manager = nullptr;
         }
     }
 
@@ -110,18 +110,18 @@ private:
     using ManagerFn = void (*)(void* dst, void* src) noexcept;
 
     void move_from(InplaceFunction&& other) noexcept {
-        if (other.manager_ != nullptr) {
-            invoker_ = other.invoker_;
-            manager_ = other.manager_;
-            other.manager_(storage_, other.storage_);
-            other.invoker_ = nullptr;
-            other.manager_ = nullptr;
+        if (other.m_manager != nullptr) {
+            m_invoker = other.m_invoker;
+            m_manager = other.m_manager;
+            other.m_manager(m_storage, other.m_storage);
+            other.m_invoker = nullptr;
+            other.m_manager = nullptr;
         }
     }
 
-    alignas(std::max_align_t) std::byte storage_[Capacity]{};
-    InvokerFn invoker_{nullptr};
-    ManagerFn manager_{nullptr};
+    alignas(std::max_align_t) std::byte m_storage[Capacity]{};
+    InvokerFn m_invoker{nullptr};
+    ManagerFn m_manager{nullptr};
 };
 
 } // namespace hft
